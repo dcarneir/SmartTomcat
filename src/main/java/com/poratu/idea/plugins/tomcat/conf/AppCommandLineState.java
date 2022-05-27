@@ -32,14 +32,18 @@ import javax.xml.xpath.XPathExpression;
 import javax.xml.xpath.XPathFactory;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 /**
  * Author : zengkid
@@ -94,7 +98,6 @@ public class AppCommandLineState extends JavaCommandLineState {
                 confPath.toFile().mkdirs();
             }
 
-
             FileUtil.copyFileOrDir(tomcatInstallationPath.resolve("conf").toFile(), confPath.toFile());
 
             javaParams.setWorkingDirectory(workPath.toFile());
@@ -126,10 +129,42 @@ public class AppCommandLineState extends JavaCommandLineState {
         return new ServerConsoleView(configuration);
     }
 
+    private void syncFileTree(Path source, Path dest) throws IOException {
+        final File files[] = source.toFile().listFiles();
+        for(File file: files) {
+            final Path path = file.toPath();
+            try {
+                if(path.toFile().isDirectory()) {
+                    Path d = dest.resolve(path.getFileName());
+                    Files.createDirectories(d);
+                    syncFileTree(path, d);
+                } else {
+                    Files.createSymbolicLink(dest.resolve(path.toFile().getName()), path);
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+        };
+    }
+
     private void updateServerConf(String tomcatVersion, Module module, Path confPath, String contextPath, TomcatRunConfiguration cfg) throws Exception {
 
-        Path serverXml = confPath.resolve("server.xml");
+        Path libPath = confPath.getParent().resolve("libs");
+        if(libPath.toFile().exists()) {
+            Files.walk(libPath).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+            libPath.toFile().delete();
+        } 
+        libPath.toFile().mkdirs();
 
+        Path classesPath = confPath.getParent().resolve("classes");
+        if(classesPath.toFile().exists()) {
+            Files.walk(classesPath).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+            classesPath.toFile().delete();
+        } 
+        classesPath.toFile().mkdirs();
+
+        Path serverXml = confPath.resolve("server.xml");
 
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         DocumentBuilder builder = factory.newDocumentBuilder();
@@ -139,8 +174,7 @@ public class AppCommandLineState extends JavaCommandLineState {
         XPathExpression exprConnectorShutdown = xpath.compile("/Server[@shutdown='SHUTDOWN']");
         XPathExpression exprConnector = xpath.compile("/Server/Service[@name='Catalina']/Connector[@protocol='HTTP/1.1']");
         XPathExpression expr = xpath.compile("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host");
-        XPathExpression exprContext = xpath.compile
-                ("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host/Context");
+        XPathExpression exprContext = xpath.compile("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host/Context");
 
         Element portShutdown = (Element) exprConnectorShutdown.evaluate(doc, XPathConstants.NODE);
         Element portE = (Element) exprConnector.evaluate(doc, XPathConstants.NODE);
@@ -190,27 +224,33 @@ public class AppCommandLineState extends JavaCommandLineState {
             if (version >= 8) { //for tomcat8
 
                 Element resourcesE = doc.createElement("Resources");
+                resourcesE.setAttribute("allowLinking", "true");
                 contextE.appendChild(resourcesE);
                 for (String classPath : paths) {
                     File file = Paths.get(classPath).toFile();
 
                     if (file.isFile()) {
-                        Element postResourcesE = doc.createElement("PostResources");
-
-                        postResourcesE.setAttribute("base", classPath);
-                        postResourcesE.setAttribute("className", "org.apache.catalina.webresources.FileResourceSet");
-                        postResourcesE.setAttribute("webAppMount", "/WEB-INF/lib/" + file.getName());
-                        resourcesE.appendChild(postResourcesE);
-
+                        Path original = Path.of(classPath);
+                        Path dest = libPath.resolve(file.getName());
+                        FileUtil.copyFileOrDir(original.toFile(), dest.toFile());
                     } else {
-                        Element preResourcesE = doc.createElement("PreResources");
-                        preResourcesE.setAttribute("base", classPath);
-                        preResourcesE.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
-                        preResourcesE.setAttribute("webAppMount", "/WEB-INF/classes");
-                        resourcesE.appendChild(preResourcesE);
+                        syncFileTree(Path.of(classPath), classesPath);
                     }
 
                 }
+
+                Element preResourcesE = doc.createElement("PreResources");
+                preResourcesE.setAttribute("base", classesPath.toFile().getAbsolutePath());
+                preResourcesE.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
+                preResourcesE.setAttribute("webAppMount", "/WEB-INF/classes");
+                resourcesE.appendChild(preResourcesE);
+
+                Element postResourcesE = doc.createElement("PostResources");
+                postResourcesE.setAttribute("base", libPath.toFile().getAbsolutePath());
+                postResourcesE.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
+                postResourcesE.setAttribute("webAppMount", "/WEB-INF/lib");
+                resourcesE.appendChild(postResourcesE);
+
             } else if (version >= 6) { //for tomcat6-7
                 Element loaderE = doc.createElement("Loader");
                 loaderE.setAttribute("className", "org.apache.catalina.loader.VirtualWebappLoader");
