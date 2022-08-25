@@ -17,6 +17,7 @@ import com.intellij.openapi.roots.OrderEnumerator;
 import com.intellij.openapi.roots.ProjectRootManager;
 import com.intellij.openapi.util.io.FileUtil;
 import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.PathsList;
 import com.poratu.idea.plugins.tomcat.utils.PluginUtils;
 import org.jetbrains.annotations.NotNull;
@@ -30,6 +31,7 @@ import org.xml.sax.SAXException;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.transform.Source;
+import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerException;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -38,10 +40,12 @@ import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathExpression;
 import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
 import java.util.Map;
 
 /**
@@ -125,6 +129,8 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             updateServerConf(confPath, configuration);
             createContextFile(tomcatVersion, module, confPath, configuration.getDocBase(), contextPath);
             deleteTomcatWorkFiles(workingPath);
+            //mod
+            tomcatFix(confPath, module, configuration.getDocBase(), contextPath);
 
             ProjectRootManager manager = ProjectRootManager.getInstance(project);
 
@@ -301,5 +307,119 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             return true;
         });
     }
+
+    /*** mod start ***/
+
+    private void tomcatFix(Path confPath, @NotNull Module module, String docBase, String contextPath) throws IOException, ParserConfigurationException, SAXException, TransformerException {
+        createWebappResources(confPath, module);
+        buildContext(confPath, module, docBase, contextPath);
+    }
+
+    private void buildContext(Path confPath, @NotNull Module module, String docBase, String contextPath) throws ParserConfigurationException, IOException, SAXException, TransformerException {
+        final Path workingPath = PluginUtils.getWorkingPath(configuration);
+        final Path classesPath = workingPath.resolve("classes");
+        final Path libPath = workingPath.resolve("libs");
+
+        String contextName = StringUtil.trimStart(contextPath, "/");
+        Path contextFilesDir = confPath.resolve("Catalina/localhost");
+        Path contextFilePath = contextFilesDir.resolve(contextName + ".xml");
+
+        // Create `conf/Catalina/localhost` folder
+        FileUtil.createDirectory(contextFilesDir.toFile());
+
+        DocumentBuilder builder = PluginUtils.createDocumentBuilder();
+        Document doc = builder.newDocument();
+        Element root;
+
+        Path contextFile = findContextFileInApp();
+        if (contextFile == null) {
+            root = doc.createElement("Context");
+        } else {
+            Element contextEl = builder.parse(contextFile.toFile()).getDocumentElement();
+            root = (Element) doc.importNode(contextEl, true);
+        }
+
+        root.setAttribute("docBase", docBase);
+        root.setAttribute("reloadable", "true");
+
+        // base elements
+        Element resourcesE = doc.createElement("Resources");
+        resourcesE.setAttribute("allowLinking", "true");
+        root.appendChild(resourcesE);
+
+        Element preResourcesE = doc.createElement("PreResources");
+        preResourcesE.setAttribute("base", classesPath.toFile().getAbsolutePath());
+        preResourcesE.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
+        preResourcesE.setAttribute("webAppMount", "/WEB-INF/classes");
+        resourcesE.appendChild(preResourcesE);
+
+        Element postResourcesE = doc.createElement("PostResources");
+        postResourcesE.setAttribute("base", libPath.toFile().getAbsolutePath());
+        postResourcesE.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
+        postResourcesE.setAttribute("webAppMount", "/WEB-INF/lib");
+        resourcesE.appendChild(postResourcesE);
+
+        doc.appendChild(root);
+
+        DOMSource source = new DOMSource(doc);
+        StreamResult result = new StreamResult(contextFilePath.toFile());
+        PluginUtils.createTransformer().transform(source, result);
+
+    }
+
+
+    private void createWebappResources(Path confPath, @NotNull Module module) throws IOException {
+        final Path workingPath = PluginUtils.getWorkingPath(configuration);
+        final Path classesPath = workingPath.resolve("classes");
+        final Path libPath = workingPath.resolve("libs");
+
+        // clenaup libs
+        if(libPath.toFile().exists()) {
+            Files.walk(libPath).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+            libPath.toFile().delete();
+        }
+        libPath.toFile().mkdirs();
+
+        // cleanup classes
+        if(classesPath.toFile().exists()) {
+            Files.walk(classesPath).sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(File::delete);
+            classesPath.toFile().delete();
+        }
+        classesPath.toFile().mkdirs();
+
+        PathsList pathsList = OrderEnumerator.orderEntries(module).withoutSdk().runtimeOnly().productionOnly().getPathsList();
+        for(VirtualFile file: pathsList.getVirtualFiles()) {
+            if (file.isDirectory()) {
+                syncFileTree(Path.of(file.getPath()), classesPath);
+            } else {
+                Path original = Path.of(file.getPath());
+                Path dest = libPath.resolve(file.getName());
+                FileUtil.copyFileOrDir(original.toFile(), dest.toFile());
+            }
+
+        };
+
+    }
+
+    private void syncFileTree(Path source, Path dest) throws IOException {
+        final File files[] = source.toFile().listFiles();
+        for(File file: files) {
+            final Path path = file.toPath();
+            try {
+                if(path.toFile().isDirectory()) {
+                    Path d = dest.resolve(path.getFileName());
+                    Files.createDirectories(d);
+                    syncFileTree(path, d);
+                } else {
+                    Files.createSymbolicLink(dest.resolve(path.toFile().getName()), path);
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+        };
+    }
+
+    /*** mod end ***/
 
 }
