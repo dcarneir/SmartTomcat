@@ -1,10 +1,16 @@
 name: build
 
-on: [workflow_dispatch]
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -13,8 +19,7 @@ jobs:
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
-          java-version: 17
-
+          java-version: 11
 
       - name: Build with Gradle
         run: |
