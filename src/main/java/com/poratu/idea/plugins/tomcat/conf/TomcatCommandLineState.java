@@ -16,6 +16,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.OrderEnumerator;
 import com.intellij.openapi.roots.ProjectRootManager;
 import com.intellij.openapi.util.io.FileUtil;
+import com.intellij.openapi.util.registry.Registry;
 import com.intellij.openapi.util.text.StringUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.PathsList;
@@ -300,6 +301,16 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             resources = doc.createElement("Resources");
             contextRoot.appendChild(resources);
         }
+
+        if (Registry.is("smartTomcat.resources.allowLinking")) {
+            resources.setAttribute("allowLinking", "true");
+        }
+
+        int cacheMaxSize = Registry.intValue("smartTomcat.resources.cacheMaxSize", 10240);
+        if (cacheMaxSize > 0) {
+            resources.setAttribute("cacheMaxSize", String.valueOf(cacheMaxSize));
+        }
+
         return resources;
     }
 
