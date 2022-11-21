@@ -30,8 +30,6 @@ import org.xml.sax.SAXException;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.ParserConfigurationException;
-import javax.xml.transform.Source;
-import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerException;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -42,6 +40,7 @@ import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
 import java.io.File;
 import java.io.IOException;
+import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -113,7 +112,6 @@ public class TomcatCommandLineState extends JavaCommandLineState {
 
             Path tomcatInstallationPath = Paths.get(configuration.getTomcatInfo().getPath());
             Project project = configuration.getProject();
-            String contextPath = configuration.getContextPath();
             String tomcatVersion = configuration.getTomcatInfo().getVersion();
             String vmOptions = configuration.getVmOptions();
             Map<String, String> envOptions = configuration.getEnvOptions();
@@ -127,10 +125,10 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             FileUtil.createDirectory(workingPath.resolve("temp").toFile());
 
             updateServerConf(confPath, configuration);
-            createContextFile(tomcatVersion, module, confPath, configuration.getDocBase(), contextPath);
+            createContextFile(tomcatVersion, module, confPath);
             deleteTomcatWorkFiles(workingPath);
             //mod
-            tomcatFix(confPath, module, configuration.getDocBase(), contextPath);
+            tomcatFix(confPath, module, configuration.getDocBase(), configuration.getContextPath());
 
             ProjectRootManager manager = ProjectRootManager.getInstance(project);
 
@@ -143,7 +141,7 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             javaParams.setMainClass(TOMCAT_MAIN_CLASS);
             javaParams.getProgramParametersList().add("start");
 
-            javaParams.setPassParentEnvs(configuration.getPassParentEnvironmentVariables());
+            javaParams.setPassParentEnvs(configuration.isPassParentEnvs());
             if (envOptions != null) {
                 javaParams.setEnv(envOptions);
             }
@@ -172,71 +170,66 @@ public class TomcatCommandLineState extends JavaCommandLineState {
     private void updateServerConf(Path confPath, TomcatRunConfiguration cfg)
             throws ParserConfigurationException, XPathExpressionException, TransformerException, IOException, SAXException {
         Path serverXml = confPath.resolve("server.xml");
-
-        DocumentBuilder builder = PluginUtils.createDocumentBuilder();
-        Document doc = builder.parse(serverXml.toFile());
-        XPathFactory xPathfactory = XPathFactory.newInstance();
-        XPath xpath = xPathfactory.newXPath();
+        Document doc = PluginUtils.createDocumentBuilder().parse(serverXml.toFile());
+        XPath xpath = XPathFactory.newInstance().newXPath();
         XPathExpression exprConnectorShutdown = xpath.compile("/Server[@shutdown='SHUTDOWN']");
         XPathExpression exprConnector = xpath.compile("/Server/Service[@name='Catalina']/Connector[@protocol='HTTP/1.1']");
-        XPathExpression exprContext = xpath.compile
-                ("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host/Context");
+        XPathExpression exprContext = xpath.compile("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host/Context");
 
         Element portShutdown = (Element) exprConnectorShutdown.evaluate(doc, XPathConstants.NODE);
         Element portE = (Element) exprConnector.evaluate(doc, XPathConstants.NODE);
-        NodeList nodeList = (NodeList) exprContext.evaluate(doc, XPathConstants.NODESET);
 
-        if (nodeList != null && nodeList.getLength() > 0) {
+        NodeList nodeList = (NodeList) exprContext.evaluate(doc, XPathConstants.NODESET);
+        if (nodeList != null) {
             for (int i = 0; i < nodeList.getLength(); i++) {
                 Node node = nodeList.item(i);
                 node.getParentNode().removeChild(node);
             }
         }
-        portShutdown.setAttribute("port", cfg.getAdminPort());
-        portE.setAttribute("port", cfg.getPort());
 
-        Source source = new DOMSource(doc);
-        StreamResult result = new StreamResult(serverXml.toFile());
-        PluginUtils.createTransformer().transform(source, result);
+        portShutdown.setAttribute("port", String.valueOf(cfg.getAdminPort()));
+        portE.setAttribute("port", String.valueOf(cfg.getPort()));
+
+        PluginUtils.createTransformer().transform(new DOMSource(doc), new StreamResult(serverXml.toFile()));
     }
 
-    private void createContextFile(String tomcatVersion, Module module, Path confPath, String docBase, String contextPath)
+    private void createContextFile(String tomcatVersion, Module module, Path confPath)
             throws ParserConfigurationException, IOException, SAXException, TransformerException {
-        String contextName = StringUtil.trimStart(contextPath, "/");
+        String docBase = configuration.getDocBase();
+        String contextPath = configuration.getContextPath();
+        String normalizedContextPath = StringUtil.trim(contextPath, ch -> ch != '/');
+        String contextFileName = StringUtil.defaultIfEmpty(normalizedContextPath, "ROOT").replace('/', '#');
         Path contextFilesDir = confPath.resolve("Catalina/localhost");
-        Path contextFilePath = contextFilesDir.resolve(contextName + ".xml");
+        Path contextFilePath = contextFilesDir.resolve(contextFileName + ".xml");
 
         // Create `conf/Catalina/localhost` folder
         FileUtil.createDirectory(contextFilesDir.toFile());
 
         DocumentBuilder builder = PluginUtils.createDocumentBuilder();
         Document doc = builder.newDocument();
-        Element root;
+        Element contextRoot = createContextElement(doc, builder);
 
-        Path contextFile = findContextFileInApp();
-        if (contextFile == null) {
-            root = doc.createElement("Context");
-        } else {
-            Element contextEl = builder.parse(contextFile.toFile()).getDocumentElement();
-            root = (Element) doc.importNode(contextEl, true);
-        }
+        contextRoot.setAttribute("docBase", docBase);
 
-        root.setAttribute("docBase", docBase);
-        root.setAttribute("reloadable", "true");
+        collectResources(doc, contextRoot, module, tomcatVersion);
+        doc.appendChild(contextRoot);
 
-        Element resources = collectResources(doc, module, tomcatVersion);
-        if (resources != null) {
-            root.appendChild(resources);
-        }
-
-        doc.appendChild(root);
-
-        DOMSource source = new DOMSource(doc);
-        StreamResult result = new StreamResult(contextFilePath.toFile());
-        PluginUtils.createTransformer().transform(source, result);
+        StringWriter writer = new StringWriter();
+        PluginUtils.createTransformer().transform(new DOMSource(doc), new StreamResult(writer));
+        FileUtil.writeToFile(contextFilePath.toFile(), writer.toString());
     }
 
-    @Nullable
+    private Element createContextElement(Document doc, DocumentBuilder builder) throws IOException, SAXException {
+        Path contextFile = findContextFileInApp();
+
+        if (contextFile == null) {
+            return doc.createElement("Context");
+        }
+
+        Element contextEl = builder.parse(contextFile.toFile()).getDocumentElement();
+        return (Element) doc.importNode(contextEl, true);
+    }
+
     private Path findContextFileInApp() {
         String docBase = configuration.getDocBase();
         if (docBase == null) {
@@ -256,45 +249,58 @@ public class TomcatCommandLineState extends JavaCommandLineState {
         }
     }
 
-    private Element collectResources(Document doc, @NotNull Module module, String tomcatVersion) {
+    private void collectResources(Document doc, Element contextRoot, Module module, String tomcatVersion) {
         String majorVersionStr = tomcatVersion.split("\\.")[0];
         int majorVersion = Integer.parseInt(majorVersionStr);
         PathsList pathsList = OrderEnumerator.orderEntries(module)
                 .withoutSdk().runtimeOnly().productionOnly().getPathsList();
 
         if (pathsList.isEmpty()) {
-            return null;
+            return;
         }
 
         if (majorVersion >= 8) {
-            Element resources = doc.createElement("Resources");
+            Element resources = createResourcesElementIfNecessary(doc, contextRoot);
             pathsList.getVirtualFiles().forEach(file -> {
                 Element res;
+                String tagName;
+                String className;
+                String webAppMount;
+
                 if (file.isDirectory()) {
-                    res = doc.createElement("PreResources");
-                    res.setAttribute("className", "org.apache.catalina.webresources.DirResourceSet");
-                    res.setAttribute("webAppMount", "/WEB-INF/classes");
+                    tagName = "PreResources";
+                    className = "org.apache.catalina.webresources.DirResourceSet";
+                    webAppMount = "/WEB-INF/classes";
                 } else {
-                    res = doc.createElement("PostResources");
-                    res.setAttribute("className", "org.apache.catalina.webresources.FileResourceSet");
-                    res.setAttribute("webAppMount", "/WEB-INF/lib/" + file.getName());
+                    tagName = "PostResources";
+                    className = "org.apache.catalina.webresources.FileResourceSet";
+                    webAppMount = "/WEB-INF/lib/" + file.getName();
                 }
+
+                res = doc.createElement(tagName);
                 res.setAttribute("base", file.getPath());
+                res.setAttribute("className", className);
+                res.setAttribute("webAppMount", webAppMount);
+
                 resources.appendChild(res);
             });
-
-            return resources;
-        }
-
-        if (majorVersion >= 6) {
+        } else if (majorVersion >= 6) {
             Element loader = doc.createElement("Loader");
             loader.setAttribute("className", "org.apache.catalina.loader.VirtualWebappLoader");
             loader.setAttribute("virtualClasspath", StringUtil.join(pathsList.getPathList(), ";"));
-
-            return loader;
+            contextRoot.appendChild(loader);
+        } else {
+            throw new RuntimeException("Unsupported Tomcat version: " + tomcatVersion);
         }
+    }
 
-        return null;
+    private Element createResourcesElementIfNecessary(Document doc, Element contextRoot) {
+        Element resources = (Element) contextRoot.getElementsByTagName("Resources").item(0);
+        if (resources == null) {
+            resources = doc.createElement("Resources");
+            contextRoot.appendChild(resources);
+        }
+        return resources;
     }
 
     private void deleteTomcatWorkFiles(Path tomcatHome) {
@@ -340,7 +346,7 @@ public class TomcatCommandLineState extends JavaCommandLineState {
         }
 
         root.setAttribute("docBase", docBase);
-        root.setAttribute("reloadable", "true");
+        root.setAttribute("reloadable", "false");
 
         // base elements
         Element resourcesE = doc.createElement("Resources");

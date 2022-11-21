@@ -1,27 +1,53 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 # SmartTomcat Changelog
 
-## [4.3.3]
+## [4.3.7]
+### Changed
 
+- Fix context paths like /foo/bar may not working on Windows, fix #95
+
+## [4.3.6]
+### Changed
+
+- Allow `Context Path` to be empty
+- Support `Context Path` like `/foo/bar`
+- Fix #92
+
+## [4.3.5]
+### Changed
+- Remove Context elements inside the `server.xml`, fix #91
+- Remove `reloadable` from the generated context xml file
+- Pretty print the generated context xml file
+- Improve the Tomcat configuration producer
+
+## [4.3.4]
+### Changed
+- Improve the Tomcat runner settings editor 
+- Reuse the `<Resources>` element in the context.xml file, fixes #83
+
+## [4.3.3]
+### Changed
 - Improve Tomcat server management
 - Remove unnecessary `path` in Tomcat context file
 - Handle exceptions in older IDE versions
 
 ## [4.3.2]
-
+### Changed
 - Fix the bug where the `temp` folder is not created
 
 ## [4.3.1]
-
+### Added
 - Support Tomcat 6 and 7
+### Changed
 - Use separate context file to deploy webapps (#89)
 - Fixed IDEA warning during startup
 - Fixed the wrong `catalina.home` value
 
 ## [4.3.0]
-
+### Added
 - Added support for redirecting the Tomcat logs to console.
 - Added support for exiting the Tomcat process gracefully when stopping
+### Changed
 - Fixed the incorrect path of the Tomcat logs
 - Improved the TomcatRunner
 
