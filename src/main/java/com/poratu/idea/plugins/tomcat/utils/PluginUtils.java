@@ -6,6 +6,7 @@ import com.intellij.openapi.fileChooser.FileChooserDescriptor;
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.module.ModuleManager;
+import com.intellij.openapi.module.ModuleUtilCore;
 import com.intellij.openapi.options.ConfigurationException;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
@@ -13,12 +14,14 @@ import com.intellij.openapi.roots.ModuleFileIndex;
 import com.intellij.openapi.roots.ModuleRootManager;
 import com.intellij.openapi.roots.ProjectFileIndex;
 import com.intellij.openapi.util.text.StringUtil;
+import com.intellij.openapi.vfs.VfsUtil;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.util.ArrayUtil;
 import com.poratu.idea.plugins.tomcat.conf.TomcatRunConfiguration;
 import com.poratu.idea.plugins.tomcat.setting.TomcatInfo;
 import com.poratu.idea.plugins.tomcat.setting.TomcatServerManagerState;
 import com.poratu.idea.plugins.tomcat.setting.TomcatServersConfigurable;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.xml.XMLConstants;
@@ -29,10 +32,12 @@ import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerFactory;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -94,8 +99,8 @@ public final class PluginUtils {
                 .ifPresent(callback));
     }
 
-    public static Path getWorkingPath(TomcatRunConfiguration configuration) {
-
+    @Nullable
+    private static Path defaultCatalinaBase(TomcatRunConfiguration configuration) {
         String userHome = System.getProperty("user.home");
         Project project = configuration.getProject();
         Module module = configuration.getModule();
@@ -104,13 +109,32 @@ public final class PluginUtils {
             return null;
         }
 
-        return Paths.get(userHome, ".SmartTomcat", project.getName(), module.getName());
+        Path path = Paths.get(userHome, ".SmartTomcat", project.getName(), module.getName());
+        if (!Files.exists(path)) {
+            try {
+                Files.createDirectories(path);
+            } catch (IOException e) {
+                return null;
+            }
+        }
+
+        return path;
+    }
+
+    @Nullable
+    public static Path getCatalinaBase(TomcatRunConfiguration configuration) {
+        if(!StringUtil.isEmptyOrSpaces(configuration.getCatalinaBase())) {
+            /* CATALINA_BASE override from intellij run configuration */
+            return Paths.get(configuration.getCatalinaBase());
+        }
+
+        return defaultCatalinaBase(configuration);
     }
 
     public static Path getTomcatLogsDirPath(TomcatRunConfiguration configuration) {
-        Path workingDir = getWorkingPath(configuration);
-        if (workingDir != null) {
-            return workingDir.resolve("logs");
+        Path catalinaBase = getCatalinaBase(configuration);
+        if (catalinaBase != null) {
+            return catalinaBase.resolve("logs");
         }
         return null;
     }
@@ -233,5 +257,56 @@ public final class PluginUtils {
         }
 
         return ProjectFileIndex.getInstance(location.getProject()).isInTestSourceContent(file);
+    }
+
+    /**
+     * Get all modules except the module with name ends with ".test"
+     */
+    public static List<Module> getModules(Project project) {
+        Module[] modules = ModuleManager.getInstance(project).getModules();
+        return Arrays.stream(modules).filter(module -> !module.getName().endsWith(".test")).collect(Collectors.toList());
+    }
+
+    /**
+     * Prefer the module with name ends with ".main" and has the least number of dots in the name,
+     * e.g. `webapp.main` will be chosen over `webapp.library.main`
+     * If no module with name ends with ".main", return the first module
+     */
+    public static @Nullable Module guessModule(Project project) {
+        List<Module> modules = getModules(project);
+        Module result = null;
+        int dotCountInModuleName = Integer.MAX_VALUE;
+
+        for (Module module : modules) {
+            if (module.getName().endsWith(".main")) {
+                int dotCount = StringUtil.countChars(module.getName(), '.');
+                if (dotCount < dotCountInModuleName) {
+                    result = module;
+                    dotCountInModuleName = dotCount;
+                }
+            }
+        }
+
+        if (result != null) {
+            return result;
+        }
+
+        return modules.stream().findFirst().orElse(null);
+    }
+
+    /**
+     * Find the module containing the file
+     */
+    public static @Nullable Module findContainingModule(@Nullable String filePath, @NotNull Project project) {
+        if (StringUtil.isEmpty(filePath)) {
+            return null;
+        }
+
+        VirtualFile virtualFile = VfsUtil.findFile(Paths.get(filePath), true);
+        if (virtualFile == null) {
+            return null;
+        }
+
+        return ModuleUtilCore.findModuleForFile(virtualFile, project);
     }
 }

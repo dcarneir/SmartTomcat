@@ -7,8 +7,9 @@ import com.intellij.execution.configurations.GeneralCommandLine;
 import com.intellij.execution.configurations.JavaCommandLineState;
 import com.intellij.execution.configurations.JavaParameters;
 import com.intellij.execution.configurations.ParametersList;
-import com.intellij.execution.process.KillableProcessHandler;
+import com.intellij.execution.process.KillableColoredProcessHandler;
 import com.intellij.execution.process.OSProcessHandler;
+import com.intellij.execution.process.ProcessTerminatedListener;
 import com.intellij.execution.runners.ExecutionEnvironment;
 import com.intellij.execution.ui.ConsoleView;
 import com.intellij.openapi.module.Module;
@@ -94,20 +95,21 @@ public class TomcatCommandLineState extends JavaCommandLineState {
     @Override
     @NotNull
     protected OSProcessHandler startProcess() throws ExecutionException {
-        OSProcessHandler progressHandler = super.startProcess();
-        if (progressHandler instanceof KillableProcessHandler) {
-            boolean shouldKillSoftly = !DebuggerSettings.getInstance().KILL_PROCESS_IMMEDIATELY;
-            ((KillableProcessHandler) progressHandler).setShouldKillProcessSoftly(shouldKillSoftly);
-        }
-        return progressHandler;
+        KillableColoredProcessHandler processHandler = new KillableColoredProcessHandler(createCommandLine());
+        boolean shouldKillSoftly = !DebuggerSettings.getInstance().KILL_PROCESS_IMMEDIATELY;
+
+        processHandler.setShouldKillProcessSoftly(shouldKillSoftly);
+        ProcessTerminatedListener.attach(processHandler);
+
+        return processHandler;
     }
 
     @Override
     protected JavaParameters createJavaParameters() {
         try {
-            Path workingPath = PluginUtils.getWorkingPath(configuration);
+            Path catalinaBase = PluginUtils.getCatalinaBase(configuration);
             Module module = configuration.getModule();
-            if (workingPath == null || module == null) {
+            if (catalinaBase == null || module == null) {
                 throw new ExecutionException("The Module Root specified is not a module according to Intellij");
             }
 
@@ -115,19 +117,27 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             Project project = configuration.getProject();
             String tomcatVersion = configuration.getTomcatInfo().getVersion();
             String vmOptions = configuration.getVmOptions();
+            String extraClassPath = configuration.getExtraClassPath();
             Map<String, String> envOptions = configuration.getEnvOptions();
 
+            //copy to project folder, and then user is able to update server.xml under the project.
+            Path projectConfPath = Paths.get(project.getBasePath(), ".smarttomcat", module.getName(), "conf");
+            if (!projectConfPath.toFile().exists()) {
+                FileUtil.createDirectory(projectConfPath.toFile());
+                FileUtil.copyDir(tomcatInstallationPath.resolve("conf").toFile(), projectConfPath.toFile());
+            }
+
             // Copy the Tomcat configuration files to the working directory
-            Path confPath = workingPath.resolve("conf");
+            Path confPath = catalinaBase.resolve("conf");
             FileUtil.delete(confPath);
             FileUtil.createDirectory(confPath.toFile());
-            FileUtil.copyDir(tomcatInstallationPath.resolve("conf").toFile(), confPath.toFile());
+            FileUtil.copyDir(projectConfPath.toFile(), confPath.toFile());
             // create the temp folder
-            FileUtil.createDirectory(workingPath.resolve("temp").toFile());
+            FileUtil.createDirectory(catalinaBase.resolve("temp").toFile());
 
             updateServerConf(confPath, configuration);
             createContextFile(tomcatVersion, module, confPath);
-            deleteTomcatWorkFiles(workingPath);
+            deleteTomcatWorkFiles(catalinaBase);
             //mod
             tomcatFix(confPath, module, configuration.getDocBase(), configuration.getContextPath());
 
@@ -135,10 +145,15 @@ public class TomcatCommandLineState extends JavaCommandLineState {
 
             JavaParameters javaParams = new JavaParameters();
             javaParams.setDefaultCharset(project);
-            javaParams.setWorkingDirectory(workingPath.toFile());
+            javaParams.setWorkingDirectory(catalinaBase.toFile());
             javaParams.setJdk(manager.getProjectSdk());
+
             javaParams.getClassPath().add(tomcatInstallationPath.resolve("bin/bootstrap.jar").toFile());
             javaParams.getClassPath().add(tomcatInstallationPath.resolve("bin/tomcat-juli.jar").toFile());
+            if (StringUtil.isNotEmpty(extraClassPath)) {
+                javaParams.getClassPath().addAll(StringUtil.split(extraClassPath, File.pathSeparator));
+            }
+
             javaParams.setMainClass(TOMCAT_MAIN_CLASS);
             javaParams.getProgramParametersList().add("start");
 
@@ -150,8 +165,8 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             ParametersList vmParams = javaParams.getVMParametersList();
             vmParams.addParametersString(vmOptions);
             vmParams.addProperty(PARAM_CATALINA_HOME, tomcatInstallationPath.toString());
-            vmParams.defineProperty(PARAM_CATALINA_BASE, workingPath.toString());
-            vmParams.defineProperty(PARAM_CATALINA_TMPDIR, workingPath.resolve("temp").toString());
+            vmParams.defineProperty(PARAM_CATALINA_BASE, catalinaBase.toString());
+            vmParams.defineProperty(PARAM_CATALINA_TMPDIR, catalinaBase.resolve("temp").toString());
             vmParams.defineProperty(PARAM_LOGGING_CONFIG, confPath.resolve("logging.properties").toString());
             vmParams.defineProperty(PARAM_LOGGING_MANAGER, PARAM_LOGGING_MANAGER_VALUE);
 
@@ -174,11 +189,15 @@ public class TomcatCommandLineState extends JavaCommandLineState {
         Document doc = PluginUtils.createDocumentBuilder().parse(serverXml.toFile());
         XPath xpath = XPathFactory.newInstance().newXPath();
         XPathExpression exprConnectorShutdown = xpath.compile("/Server[@shutdown='SHUTDOWN']");
-        XPathExpression exprConnector = xpath.compile("/Server/Service[@name='Catalina']/Connector[@protocol='HTTP/1.1']");
+        XPathExpression serviceExpression = xpath.compile("/Server/Service[@name='Catalina']");
+        XPathExpression exprConnector = xpath.compile("/Server/Service[@name='Catalina']/Connector[@protocol='HTTP/1.1' and (not(@SSLEnabled) or @SSLEnabled='false')]");
+        XPathExpression exprSSLConnector = xpath.compile("/Server/Service[@name='Catalina']/Connector[@SSLEnabled='true']");
         XPathExpression exprContext = xpath.compile("/Server/Service[@name='Catalina']/Engine[@name='Catalina']/Host/Context");
 
+        Element serviceE = (Element) serviceExpression.evaluate(doc, XPathConstants.NODE);
         Element portShutdown = (Element) exprConnectorShutdown.evaluate(doc, XPathConstants.NODE);
         Element portE = (Element) exprConnector.evaluate(doc, XPathConstants.NODE);
+        Element sslPortE = (Element) exprSSLConnector.evaluate(doc, XPathConstants.NODE);
 
         NodeList nodeList = (NodeList) exprContext.evaluate(doc, XPathConstants.NODESET);
         if (nodeList != null) {
@@ -188,8 +207,25 @@ public class TomcatCommandLineState extends JavaCommandLineState {
             }
         }
 
-        portShutdown.setAttribute("port", String.valueOf(cfg.getAdminPort()));
-        portE.setAttribute("port", String.valueOf(cfg.getPort()));
+        if (portShutdown != null) {
+            portShutdown.setAttribute("port", String.valueOf(cfg.getAdminPort()));
+        }
+        if (portE != null) {
+            portE.setAttribute("port", String.valueOf(cfg.getPort()));
+        }
+        Integer sslPort = cfg.getSslPort();
+
+        if (sslPortE != null && sslPort != null) {
+            // Update SSL configuration
+            sslPortE.setAttribute("port", sslPort.toString());
+            portE.setAttribute("redirectPort", sslPort.toString());
+        } else {
+            // Clean up SSL configuration
+            portE.removeAttribute("redirectPort");
+            if (serviceE != null && sslPortE != null) {
+                serviceE.removeChild(sslPortE);
+            }
+        }
 
         PluginUtils.createTransformer().transform(new DOMSource(doc), new StreamResult(serverXml.toFile()));
     }
@@ -333,9 +369,9 @@ public class TomcatCommandLineState extends JavaCommandLineState {
     }
 
     private void buildContext(Path confPath, @NotNull Module module, String docBase, String contextPath) throws ParserConfigurationException, IOException, SAXException, TransformerException {
-        final Path workingPath = PluginUtils.getWorkingPath(configuration);
-        final Path classesPath = workingPath.resolve("classes");
-        final Path libPath = workingPath.resolve("libs");
+        final Path catalinaBase = PluginUtils.getCatalinaBase(configuration);
+        final Path classesPath = catalinaBase.resolve("classes");
+        final Path libPath = catalinaBase.resolve("libs");
 
         String contextName = StringUtil.trimStart(contextPath, "/");
         Path contextFilesDir = confPath.resolve("Catalina/localhost");
@@ -386,7 +422,7 @@ public class TomcatCommandLineState extends JavaCommandLineState {
 
 
     private void createWebappResources(Path confPath, @NotNull Module module) throws IOException {
-        final Path workingPath = PluginUtils.getWorkingPath(configuration);
+        final Path workingPath = PluginUtils.getCatalinaBase(configuration);
         final Path classesPath = workingPath.resolve("classes");
         final Path libPath = workingPath.resolve("libs");
 

@@ -1,6 +1,50 @@
 <!-- Keep a Changelog guide -> https://keepachangelog.com -->
 # SmartTomcat Changelog
 
+##[4.7.4]
+
+### Fixed
+- write change log in plugin.xml
+
+## [4.7.3]
+
+- be able to update the server.xml under the <project>/.smarttomcat/<module>/conf.
+
+## [4.7.2]
+
+- Add option to disable run configuration from context.
+
+## [4.7.1]
+
+- Improve the release CI job.
+- Fix an NPE
+
+## [4.7.0]
+
+- Support config the catalina base directory, thanks to @meier123456
+
+## [4.6.1]
+
+- Stop the debug process gracefully, fix #75.
+
+## [4.6.0]
+
+- Support configuring the SSL port, thanks to @leopoldhub.
+
+## [4.5.0]
+
+- Support reading classpath from the specific module as the classpath for Tomcat runtime.
+
+## [4.4.1]
+### Added
+
+- Added support for passing extra classpath the JVM.
+
+## [4.4.0]
+### Added
+
+- Added support for passing extra classpath the JVM.
+
 ## [4.3.8]
 ### Added
 
